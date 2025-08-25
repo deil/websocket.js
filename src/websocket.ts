@@ -12,6 +12,7 @@ interface PendingCommand {
 
 export interface GreatWebSocketEventMap {
     "statechange": ConnectionStateChangeEvent;
+	"connectiontimeout": Event;
 }
 
 export class ConnectionStateChangeEvent extends Event {
@@ -28,8 +29,11 @@ export class ConnectionStateChangeEvent extends Event {
 }
 
 export class GreatWebSocket extends EventTarget {
+	private readonly CONNECTION_TIMEOUT = 15000;
+
 	#active = false;
 	#state = ConnectionState.Disconnected;
+	#connectionWatchdog: number | null = null;
 	#pendingCommands: PendingCommand[] = [];
 
 	constructor(private readonly ws: IWebSocket) {
@@ -59,6 +63,19 @@ export class GreatWebSocket extends EventTarget {
 
 		this.#state = state;
 		this.dispatchEvent(new ConnectionStateChangeEvent(state));
+	}
+
+	startConnectionWatchdog() {
+		this.#connectionWatchdog = setTimeout(() => {
+			this.dispatchEvent(new Event('connectiontimeout'));
+		}, this.CONNECTION_TIMEOUT);
+	}
+
+	stopConnectionWatchdog() {
+		if (this.#connectionWatchdog != null) {
+			clearTimeout(this.#connectionWatchdog);
+			this.#connectionWatchdog = null;
+		}
 	}
 
 	//#region Events
