@@ -1,4 +1,4 @@
-import type { IWebSocket, RemoteCommand } from "./models";
+import { ConnectionState, type IWebSocket, type RemoteCommand } from "./models";
 
 interface PendingCommand {
 	command: RemoteCommand;
@@ -10,11 +10,68 @@ interface PendingCommand {
 	};
 }
 
-export class GreatWebSocket {
+export interface GreatWebSocketEventMap {
+    "statechange": ConnectionStateChangeEvent;
+}
+
+export class ConnectionStateChangeEvent extends Event {
+	#state: ConnectionState;
+
+	constructor(state: ConnectionState) {
+		super('statechange');
+		this.#state = state;
+	}
+
+	get state() {
+		return this.#state;
+	}
+}
+
+export class GreatWebSocket extends EventTarget {
+	#active = false;
+	#state = ConnectionState.Disconnected;
 	#pendingCommands: PendingCommand[] = [];
 
-    constructor(private readonly ws: IWebSocket) {
-    }
+	constructor(private readonly ws: IWebSocket) {
+		super();
+	}
+
+	get active() {
+		return this.#active;
+	}
+
+	get state() {
+		return this.#state;
+	}
+
+	activate() {
+		this.#active = true;
+	}
+
+	shutdown() {
+		this.#active = false;
+	}
+
+	transitionToState(state: ConnectionState) {
+		if (this.#state === state) {
+			return;
+		}
+
+		this.#state = state;
+		this.dispatchEvent(new ConnectionStateChangeEvent(state));
+	}
+
+	//#region Events
+
+	addEventListener<K extends keyof GreatWebSocketEventMap>(type: K, listener: EventListenerOrEventListenerObject, options?: boolean | AddEventListenerOptions): void {
+		super.addEventListener(type, listener, options);
+	}
+
+	removeEventListener<K extends keyof GreatWebSocketEventMap>(type: K, listener: EventListenerOrEventListenerObject, options?: boolean | EventListenerOptions): void {
+		super.removeEventListener(type, listener, options);
+	}
+
+	//#endregion
 
 	call(command: RemoteCommand): Promise<unknown> {
 		const cmd = {
@@ -47,9 +104,9 @@ export class GreatWebSocket {
 				(cmd) => cmd !== matchedCommand,
 			);
 
-            return true;
+			return true;
 		}
 
-        return false;
+		return false;
 	}
 }
