@@ -11,15 +11,15 @@ interface PendingCommand {
 }
 
 export interface GreatWebSocketEventMap {
-    "statechange": ConnectionStateChangeEvent;
-	"connectiontimeout": Event;
+	statechange: ConnectionStateChangeEvent;
+	connectiontimeout: Event;
 }
 
 export class ConnectionStateChangeEvent extends Event {
 	#state: ConnectionState;
 
 	constructor(state: ConnectionState) {
-		super('statechange');
+		super("statechange");
 		this.#state = state;
 	}
 
@@ -30,13 +30,19 @@ export class ConnectionStateChangeEvent extends Event {
 
 export class GreatWebSocket extends EventTarget {
 	private readonly CONNECTION_TIMEOUT = 15000;
+	private readonly RECONNECT_DELAY = 5000;
+	private readonly HEARTBEAT_INTERVAL = 15000;
 
 	#active = false;
 	#state = ConnectionState.Disconnected;
 	#connectionWatchdog: number | null = null;
+	#heartbeatTimeout: number | null = null;
 	#pendingCommands: PendingCommand[] = [];
 
-	constructor(private readonly ws: IWebSocket) {
+	constructor(
+		private readonly ws: IWebSocket,
+		private readonly onConnectedFn: () => Promise<boolean>,
+	) {
 		super();
 	}
 
@@ -50,9 +56,25 @@ export class GreatWebSocket extends EventTarget {
 
 	activate() {
 		this.#active = true;
+
+		this.#heartbeatTimeout = setInterval(() => {
+			if (!this.active || !this.ws.isConnected()) {
+				return;
+			}
+
+			this.ws.heartbeat();
+		}, this.HEARTBEAT_INTERVAL);
+
+		this.ws.reconnect();
 	}
 
 	shutdown() {
+		if (this.#heartbeatTimeout != null) {
+			clearInterval(this.#heartbeatTimeout);
+			this.#heartbeatTimeout = null;
+		}
+
+		this.stopConnectionWatchdog();
 		this.#active = false;
 	}
 
@@ -62,12 +84,46 @@ export class GreatWebSocket extends EventTarget {
 		}
 
 		this.#state = state;
+
+		if (this.#state === ConnectionState.Limbo) {
+			this.startConnectionWatchdog();
+		} else if (this.#state === ConnectionState.Connected) {
+			this.stopConnectionWatchdog();
+		}
+
 		this.dispatchEvent(new ConnectionStateChangeEvent(state));
+	}
+
+	handleWebSocketOpen() {
+		this.transitionToState(ConnectionState.Limbo);
+
+		this.onConnectedFn().then((success) => {
+			if (success) {
+				this.transitionToState(ConnectionState.Connected);
+			}
+		});
+	}
+
+	handleWebSocketError() {
+		this.reconnectIfNeeded();
+	}
+
+	handleWebSocketClosed() {
+		this.reconnectIfNeeded();
+	}
+
+	handleWebSocketHeartbeatTimeout() {
+		this.reconnectIfNeeded();
+	}
+
+	handleMessageReceived(ws: WebSocket, ev: MessageEvent) {
+		this.ws.onMessage(ev);
 	}
 
 	startConnectionWatchdog() {
 		this.#connectionWatchdog = setTimeout(() => {
-			this.dispatchEvent(new Event('connectiontimeout'));
+			this.dispatchEvent(new Event("connectiontimeout"));
+			this.reconnectIfNeeded();
 		}, this.CONNECTION_TIMEOUT);
 	}
 
@@ -78,13 +134,46 @@ export class GreatWebSocket extends EventTarget {
 		}
 	}
 
+	reconnectIfNeeded() {
+		/*
+		if (eventTarget !== this.#ws) {
+	      return;
+    	}
+		*/
+
+		if (!this.active) {
+			this.transitionToState(ConnectionState.Disconnected);
+			return;
+		}
+
+		this.transitionToState(ConnectionState.Reconnecting);
+		this.stopConnectionWatchdog();
+		this.ws.close();
+
+		setTimeout(() => {
+			if (!this.active || this.ws.isConnected()) {
+				return;
+			}
+
+			this.ws.reconnect();
+		}, this.RECONNECT_DELAY);
+	}
+
 	//#region Events
 
-	addEventListener<K extends keyof GreatWebSocketEventMap>(type: K, listener: EventListenerOrEventListenerObject, options?: boolean | AddEventListenerOptions): void {
+	addEventListener<K extends keyof GreatWebSocketEventMap>(
+		type: K,
+		listener: EventListenerOrEventListenerObject,
+		options?: boolean | AddEventListenerOptions,
+	): void {
 		super.addEventListener(type, listener, options);
 	}
 
-	removeEventListener<K extends keyof GreatWebSocketEventMap>(type: K, listener: EventListenerOrEventListenerObject, options?: boolean | EventListenerOptions): void {
+	removeEventListener<K extends keyof GreatWebSocketEventMap>(
+		type: K,
+		listener: EventListenerOrEventListenerObject,
+		options?: boolean | EventListenerOptions,
+	): void {
 		super.removeEventListener(type, listener, options);
 	}
 
