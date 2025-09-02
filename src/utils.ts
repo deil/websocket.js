@@ -1,33 +1,30 @@
-import { GreatWebSocket } from "./websocket";
+import type { Operator } from "./keep-online";
 
 export const createWebSocket = (
-	wsUrl: string,
-	wrapper: GreatWebSocket,
+  wsUrl: string,
+  operator: Operator,
+  onMessageFn: (ws: WebSocket, ev: MessageEvent) => void,
 ): WebSocket => {
-	const ws = new WebSocket(wsUrl);
-	ws.onerror = (error) => {
-		console.error("WS error: ", error);
-		wrapper.handleWebSocketError();
-	};
+  const ws = new WebSocket(wsUrl);
+  ws.onerror = (error) => {
+    console.error("WS error: ", error);
+    operator.handleWebSocketError();
+  };
 
-	ws.onopen = async () => {
-		console.log("Websocket connected");
+  ws.onopen = async () => {
+    console.log("Websocket connected");
 
-		ws.onclose = (ev) => {
-			console.log("WS closed: ", ev.reason, ev);
-			wrapper.handleWebSocketClosed();
-		};
+    ws.onclose = (ev) => {
+      console.log("WS closed: ", ev.reason, ev);
+      operator.handleWebSocketClosed();
+    };
 
-		ws.onmessage = (ev) => {
-			try {
-				wrapper.handleMessageReceived(ws, ev);
-			} catch (e) {
-				console.error("Error processing received message: ", e);
-			}
-		};
+    ws.onmessage = (ev) => {
+      onMessageFn(ws, ev);
+    };
 
-		wrapper.handleWebSocketOpen();
-	};
+    operator.handleWebSocketOpen();
+  };
 
-	return ws;
+  return ws;
 };

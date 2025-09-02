@@ -1,218 +1,208 @@
-import { ConnectionState, type IWebSocket, type RemoteCommand } from "./models";
+import {
+  ConnectionStateChangeEvent,
+  type GreatWebSocketEventMap,
+} from "./events";
+import type { PendingCommand } from "./internal";
+import type { Operator } from "./keep-online";
+import { ConnectionState, type IWebSocket } from "./models";
+import type { RemoteCommand } from "./rpc";
 
-interface PendingCommand {
-	command: RemoteCommand;
-	executedAt: number;
-	rpcId?: string;
-	promise: {
-		resolve: (result: unknown) => void;
-		reject: (error: unknown) => void;
-	};
-}
+export class GreatWebSocket extends EventTarget implements Operator {
+  private readonly CONNECTION_TIMEOUT = 15000;
+  private readonly RECONNECT_DELAY = 5000;
+  private readonly HEARTBEAT_INTERVAL = 15000;
 
-export interface GreatWebSocketEventMap {
-	statechange: ConnectionStateChangeEvent;
-	connectiontimeout: Event;
-}
+  #active = false;
+  #state = ConnectionState.Disconnected;
+  #connectionWatchdog: number | null = null;
+  #heartbeatTimeout: number | null = null;
+  #pendingCommands: PendingCommand[] = [];
 
-export class ConnectionStateChangeEvent extends Event {
-	#state: ConnectionState;
+  constructor(
+    private readonly ws: IWebSocket,
+    private readonly onConnectedFn: () => Promise<boolean>,
+  ) {
+    super();
+  }
 
-	constructor(state: ConnectionState) {
-		super("statechange");
-		this.#state = state;
-	}
+  /**
+   * Whether the WebSocket is activated and running
+   */
+  get active() {
+    return this.#active;
+  }
 
-	get state() {
-		return this.#state;
-	}
-}
+  /**
+   * Actual state of the WebSocket connection
+   */
+  get state() {
+    return this.#state;
+  }
 
-export class GreatWebSocket extends EventTarget {
-	private readonly CONNECTION_TIMEOUT = 15000;
-	private readonly RECONNECT_DELAY = 5000;
-	private readonly HEARTBEAT_INTERVAL = 15000;
+  /**
+   * Activate - initiate the WebSocket connection and keep it alive
+   */
+  activate() {
+    this.#active = true;
 
-	#active = false;
-	#state = ConnectionState.Disconnected;
-	#connectionWatchdog: number | null = null;
-	#heartbeatTimeout: number | null = null;
-	#pendingCommands: PendingCommand[] = [];
+    this.#heartbeatTimeout = setInterval(() => {
+      if (!this.active || !this.ws.isConnected()) {
+        return;
+      }
 
-	constructor(
-		private readonly ws: IWebSocket,
-		private readonly onConnectedFn: () => Promise<boolean>,
-	) {
-		super();
-	}
+      this.ws.heartbeat();
+    }, this.HEARTBEAT_INTERVAL);
 
-	get active() {
-		return this.#active;
-	}
+    this.ws.reconnect();
+  }
 
-	get state() {
-		return this.#state;
-	}
+  /**
+   * Shutdown - stop and disconnect the WebSocket
+   */
+  shutdown() {
+    if (this.#heartbeatTimeout != null) {
+      clearInterval(this.#heartbeatTimeout);
+      this.#heartbeatTimeout = null;
+    }
 
-	activate() {
-		this.#active = true;
+    this.stopConnectionWatchdog();
+    this.#active = false;
+  }
 
-		this.#heartbeatTimeout = setInterval(() => {
-			if (!this.active || !this.ws.isConnected()) {
-				return;
-			}
+  handleWebSocketOpen() {
+    this.transitionToState(ConnectionState.Limbo);
 
-			this.ws.heartbeat();
-		}, this.HEARTBEAT_INTERVAL);
+    this.onConnectedFn().then((success) => {
+      if (success) {
+        this.transitionToState(ConnectionState.Connected);
+      }
+    });
+  }
 
-		this.ws.reconnect();
-	}
+  handleWebSocketError() {
+    this.reconnectIfNeeded();
+  }
 
-	shutdown() {
-		if (this.#heartbeatTimeout != null) {
-			clearInterval(this.#heartbeatTimeout);
-			this.#heartbeatTimeout = null;
-		}
+  handleWebSocketClosed() {
+    this.reconnectIfNeeded();
+  }
 
-		this.stopConnectionWatchdog();
-		this.#active = false;
-	}
+  /**
+   * Notify the WebSocket that the application-level heartbeat timeout has occurred. Will trigger a reconnect
+   */
+  handleWebSocketHeartbeatTimeout() {
+    this.reconnectIfNeeded();
+  }
 
-	transitionToState(state: ConnectionState) {
-		if (this.#state === state) {
-			return;
-		}
+  private startConnectionWatchdog() {
+    this.#connectionWatchdog = setTimeout(() => {
+      this.dispatchEvent(new Event("connectiontimeout"));
+      this.reconnectIfNeeded();
+    }, this.CONNECTION_TIMEOUT);
+  }
 
-		this.#state = state;
+  private stopConnectionWatchdog() {
+    if (this.#connectionWatchdog != null) {
+      clearTimeout(this.#connectionWatchdog);
+      this.#connectionWatchdog = null;
+    }
+  }
 
-		if (this.#state === ConnectionState.Limbo) {
-			this.startConnectionWatchdog();
-		} else if (this.#state === ConnectionState.Connected) {
-			this.stopConnectionWatchdog();
-		}
+  private transitionToState(state: ConnectionState) {
+    if (this.#state === state) {
+      return;
+    }
 
-		this.dispatchEvent(new ConnectionStateChangeEvent(state));
-	}
+    this.#state = state;
 
-	handleWebSocketOpen() {
-		this.transitionToState(ConnectionState.Limbo);
+    if (this.#state === ConnectionState.Limbo) {
+      this.startConnectionWatchdog();
+    } else if (this.#state === ConnectionState.Connected) {
+      this.stopConnectionWatchdog();
+    }
 
-		this.onConnectedFn().then((success) => {
-			if (success) {
-				this.transitionToState(ConnectionState.Connected);
-			}
-		});
-	}
+    this.dispatchEvent(new ConnectionStateChangeEvent(state));
+  }
 
-	handleWebSocketError() {
-		this.reconnectIfNeeded();
-	}
-
-	handleWebSocketClosed() {
-		this.reconnectIfNeeded();
-	}
-
-	handleWebSocketHeartbeatTimeout() {
-		this.reconnectIfNeeded();
-	}
-
-	handleMessageReceived(ws: WebSocket, ev: MessageEvent) {
-		this.ws.onMessage(ev);
-	}
-
-	startConnectionWatchdog() {
-		this.#connectionWatchdog = setTimeout(() => {
-			this.dispatchEvent(new Event("connectiontimeout"));
-			this.reconnectIfNeeded();
-		}, this.CONNECTION_TIMEOUT);
-	}
-
-	stopConnectionWatchdog() {
-		if (this.#connectionWatchdog != null) {
-			clearTimeout(this.#connectionWatchdog);
-			this.#connectionWatchdog = null;
-		}
-	}
-
-	reconnectIfNeeded() {
-		/*
+  private reconnectIfNeeded() {
+    /*
 		if (eventTarget !== this.#ws) {
 	      return;
     	}
 		*/
 
-		if (!this.active) {
-			this.transitionToState(ConnectionState.Disconnected);
-			return;
-		}
+    if (!this.active) {
+      this.transitionToState(ConnectionState.Disconnected);
+      return;
+    }
 
-		this.transitionToState(ConnectionState.Reconnecting);
-		this.stopConnectionWatchdog();
-		this.ws.close();
+    this.transitionToState(ConnectionState.Reconnecting);
+    this.stopConnectionWatchdog();
+    this.ws.close();
 
-		setTimeout(() => {
-			if (!this.active || this.ws.isConnected()) {
-				return;
-			}
+    setTimeout(() => {
+      if (!this.active || this.ws.isConnected()) {
+        return;
+      }
 
-			this.ws.reconnect();
-		}, this.RECONNECT_DELAY);
-	}
+      this.ws.reconnect();
+    }, this.RECONNECT_DELAY);
+  }
 
-	//#region Events
+  //#region Events
 
-	addEventListener<K extends keyof GreatWebSocketEventMap>(
-		type: K,
-		listener: EventListenerOrEventListenerObject,
-		options?: boolean | AddEventListenerOptions,
-	): void {
-		super.addEventListener(type, listener, options);
-	}
+  addEventListener<K extends keyof GreatWebSocketEventMap>(
+    type: K,
+    listener: EventListenerOrEventListenerObject,
+    options?: boolean | AddEventListenerOptions,
+  ): void {
+    super.addEventListener(type, listener, options);
+  }
 
-	removeEventListener<K extends keyof GreatWebSocketEventMap>(
-		type: K,
-		listener: EventListenerOrEventListenerObject,
-		options?: boolean | EventListenerOptions,
-	): void {
-		super.removeEventListener(type, listener, options);
-	}
+  removeEventListener<K extends keyof GreatWebSocketEventMap>(
+    type: K,
+    listener: EventListenerOrEventListenerObject,
+    options?: boolean | EventListenerOptions,
+  ): void {
+    super.removeEventListener(type, listener, options);
+  }
 
-	//#endregion
+  //#endregion
 
-	call(command: RemoteCommand): Promise<unknown> {
-		const cmd = {
-			command,
-			executedAt: Date.now(),
-		} as PendingCommand;
+  call(command: RemoteCommand): Promise<unknown> {
+    const cmd = {
+      command,
+      executedAt: Date.now(),
+    } as PendingCommand;
 
-		return new Promise((resolve, reject) => {
-			this.#pendingCommands.push(cmd);
+    return new Promise((resolve, reject) => {
+      this.#pendingCommands.push(cmd);
 
-			cmd.promise = { resolve, reject };
-			cmd.rpcId = command.execute(this.ws);
-		});
-	}
+      cmd.promise = { resolve, reject };
+      cmd.rpcId = command.execute(this.ws);
+    });
+  }
 
-	handleMessage(message: unknown): boolean {
-		const matchedCommand = this.#pendingCommands.find((cmd) =>
-			cmd.command.responseMatches(message),
-		);
+  handleMessage(message: unknown): boolean {
+    const matchedCommand = this.#pendingCommands.find((cmd) =>
+      cmd.command.responseMatches(message),
+    );
 
-		if (matchedCommand != null) {
-			const result = matchedCommand.command.handleResponse(message);
-			const elapsed = Date.now() - matchedCommand.executedAt;
-			console.log(
-				`Command ${matchedCommand.command.constructor.name} completed in ${elapsed} ms`,
-			);
+    if (matchedCommand != null) {
+      const result = matchedCommand.command.handleResponse(message);
+      const elapsed = Date.now() - matchedCommand.executedAt;
+      console.log(
+        `Command ${matchedCommand.command.constructor.name} completed in ${elapsed} ms`,
+      );
 
-			matchedCommand.promise.resolve(result);
-			this.#pendingCommands = this.#pendingCommands.filter(
-				(cmd) => cmd !== matchedCommand,
-			);
+      matchedCommand.promise.resolve(result);
+      this.#pendingCommands = this.#pendingCommands.filter(
+        (cmd) => cmd !== matchedCommand,
+      );
 
-			return true;
-		}
+      return true;
+    }
 
-		return false;
-	}
+    return false;
+  }
 }
