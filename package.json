@@ -2,16 +2,26 @@
 	"name": "websocket-js",
 	"version": "0.1.0",
 	"description": "Make WebSockets great again",
-	"main": "dist/index.js",
-	"types": "dist/index.d.ts",
+	"main": "dist/cjs/index.js",
+	"module": "dist/esm/index.js",
+	"types": "dist/esm/index.d.ts",
+	"sideEffects": false,
 	"files": [
 		"dist"
 	],
+	"exports": {
+		".": {
+			"import": "./dist/esm/index.js",
+			"require": "./dist/cjs/index.js"
+		}
+	},
 	"engines": {
 		"node": ">=16.20"
 	},
 	"scripts": {
-		"build": "tsc",
+		"build": "npm run build:cjs && npm run build:esm",
+		"build:cjs": "tsc -p tsconfig.json",
+		"build:esm": "tsc -p tsconfig.esm.json",
 		"test": "vitest --run",
 		"biome:check": "biome check --write",
 		"prepublishOnly": "npm run build"

@@ -1,4 +1,5 @@
-import type { ConnectionState } from "./models";
+import type { ConnectionState as ConnectionStateType } from "./models";
+import { ConnectionState } from "./models";
 
 export interface GreatWebSocketEventMap {
   statechange: ConnectionStateChangeEvent;
@@ -6,9 +7,9 @@ export interface GreatWebSocketEventMap {
 }
 
 export class ConnectionStateChangeEvent extends Event {
-  #state: ConnectionState;
+  #state: ConnectionStateType;
 
-  constructor(state: ConnectionState) {
+  constructor(state: ConnectionStateType) {
     super("statechange");
     this.#state = state;
   }

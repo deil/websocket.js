@@ -4,6 +4,7 @@ import {
 } from "./events";
 import {
   ConnectionState,
+  type ConnectionState as ConnectionStateType,
   type createWebSocketFn,
   type heartbeatFn,
 } from "./models";
@@ -22,7 +23,7 @@ export class AlwaysConnected extends EventTarget implements Operator {
 
   #active = false;
   #ws: WebSocket | null = null;
-  #state = ConnectionState.Disconnected;
+  #state: ConnectionStateType = ConnectionState.Disconnected;
   #connectionWatchdog: ReturnType<typeof setTimeout> | null = null;
   #heartbeatTimeout: ReturnType<typeof setInterval> | null = null;
 
@@ -130,7 +131,7 @@ export class AlwaysConnected extends EventTarget implements Operator {
     }
   }
 
-  private transitionToState(state: ConnectionState) {
+  private transitionToState(state: ConnectionStateType) {
     if (this.#state === state) {
       return;
     }
