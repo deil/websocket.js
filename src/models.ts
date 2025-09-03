@@ -7,12 +7,8 @@ export enum ConnectionState {
   Error = "error",
 }
 
-export interface IWebSocket {
-  isConnected(): boolean;
-  reconnect(): void;
-
-  heartbeat(): void;
-  close(): void;
-}
-
 export type createWebSocketFn = () => WebSocket;
+export type heartbeatFn = (
+  ws: WebSocket,
+  timeSinceLastHeartbeat: number,
+) => void;

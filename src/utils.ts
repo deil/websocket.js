@@ -8,7 +8,7 @@ export const createWebSocket = (
   const ws = new WebSocket(wsUrl);
   ws.onerror = (error) => {
     console.error("WS error: ", error);
-    operator.handleWebSocketError();
+    operator.handleWebSocketError(ws);
   };
 
   ws.onopen = async () => {
@@ -16,7 +16,7 @@ export const createWebSocket = (
 
     ws.onclose = (ev) => {
       console.log("WS closed: ", ev.reason, ev);
-      operator.handleWebSocketClosed();
+      operator.handleWebSocketClosed(ws);
     };
 
     ws.onmessage = (ev) => {

@@ -1,7 +1,7 @@
-import type { IWebSocket } from "./models";
+import type { GreatWebSocket } from "./websocket";
 
 export interface RemoteCommand {
-  execute(ws: IWebSocket): string;
+  execute(ws: GreatWebSocket): string;
   responseMatches: (json: unknown) => boolean;
   handleResponse(json: unknown): unknown;
 }

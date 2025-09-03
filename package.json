@@ -12,7 +12,7 @@
 	},
 	"scripts": {
 		"build": "tsc",
-		"test": "echo \"Error: no test specified\" && exit 1",
+		"test": "vitest --run",
 		"biome:check": "biome check --write",
 		"prepublishOnly": "npm run build"
 	},
@@ -29,6 +29,10 @@
 	"homepage": "https://github.com/deil/websocket.js#readme",
 	"devDependencies": {
 		"@biomejs/biome": "2.2.2",
-		"typescript": "^5.9.2"
+		"@types/node": "^24.3.0",
+		"happy-dom": "^18.0.1",
+		"ts-node": "^10.9.2",
+		"typescript": "^5.9.2",
+		"vitest": "^3.2.4"
 	}
 }

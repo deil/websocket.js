@@ -1,152 +1,83 @@
-import {
-  ConnectionStateChangeEvent,
-  type GreatWebSocketEventMap,
-} from "./events";
+import type { GreatWebSocketEventMap } from "./events";
 import type { PendingCommand } from "./internal";
-import type { Operator } from "./keep-online";
-import { ConnectionState, type IWebSocket } from "./models";
+import { AlwaysConnected, type Operator } from "./keep-online";
+import { ConnectionState, type heartbeatFn } from "./models";
 import type { RemoteCommand } from "./rpc";
+import { createWebSocket } from "./utils";
 
-export class GreatWebSocket extends EventTarget implements Operator {
-  private readonly CONNECTION_TIMEOUT = 15000;
-  private readonly RECONNECT_DELAY = 5000;
-  private readonly HEARTBEAT_INTERVAL = 15000;
-
-  #active = false;
-  #state = ConnectionState.Disconnected;
-  #connectionWatchdog: number | null = null;
-  #heartbeatTimeout: number | null = null;
+export class GreatWebSocket implements Operator {
+  #client: unknown | null = null;
+  #ws: AlwaysConnected | null = null;
   #pendingCommands: PendingCommand[] = [];
 
+  get client(): unknown | null {
+    return this.#client;
+  }
+
+  get websocket(): WebSocket | null {
+    return this.#ws?.websocket ?? null;
+  }
+
   constructor(
-    private readonly ws: IWebSocket,
+    url: string,
     private readonly onConnectedFn: () => Promise<boolean>,
+    private readonly onMessageFn: (ws: WebSocket, ev: MessageEvent) => void,
+    private readonly sendHeartbeat: heartbeatFn,
+    client: unknown | null,
   ) {
-    super();
+    this.#client = client;
+    this.#ws = new AlwaysConnected(
+      () => createWebSocket(url, this, this.onMessageFn),
+      this.onConnectedFn,
+      this.sendHeartbeat,
+    );
   }
 
   /**
    * Whether the WebSocket is activated and running
    */
   get active() {
-    return this.#active;
+    return this.#ws?.active ?? false;
   }
 
   /**
    * Actual state of the WebSocket connection
    */
   get state() {
-    return this.#state;
+    return this.#ws?.state ?? ConnectionState.Disconnected;
   }
 
   /**
    * Activate - initiate the WebSocket connection and keep it alive
    */
   activate() {
-    this.#active = true;
-
-    this.#heartbeatTimeout = setInterval(() => {
-      if (!this.active || !this.ws.isConnected()) {
-        return;
-      }
-
-      this.ws.heartbeat();
-    }, this.HEARTBEAT_INTERVAL);
-
-    this.ws.reconnect();
+    this.#ws?.activate();
   }
 
   /**
    * Shutdown - stop and disconnect the WebSocket
    */
   shutdown() {
-    if (this.#heartbeatTimeout != null) {
-      clearInterval(this.#heartbeatTimeout);
-      this.#heartbeatTimeout = null;
-    }
-
-    this.stopConnectionWatchdog();
-    this.#active = false;
+    this.#ws?.shutdown();
   }
 
   handleWebSocketOpen() {
-    this.transitionToState(ConnectionState.Limbo);
-
-    this.onConnectedFn().then((success) => {
-      if (success) {
-        this.transitionToState(ConnectionState.Connected);
-      }
-    });
+    this.#ws?.handleWebSocketOpen();
   }
 
-  handleWebSocketError() {
-    this.reconnectIfNeeded();
+  handleWebSocketError(ws: WebSocket) {
+    this.#ws?.handleWebSocketError(ws);
   }
 
-  handleWebSocketClosed() {
-    this.reconnectIfNeeded();
+  handleWebSocketClosed(ws: WebSocket) {
+    this.#ws?.handleWebSocketClosed(ws);
   }
 
   /**
    * Notify the WebSocket that the application-level heartbeat timeout has occurred. Will trigger a reconnect
    */
   handleWebSocketHeartbeatTimeout() {
-    this.reconnectIfNeeded();
-  }
-
-  private startConnectionWatchdog() {
-    this.#connectionWatchdog = setTimeout(() => {
-      this.dispatchEvent(new Event("connectiontimeout"));
-      this.reconnectIfNeeded();
-    }, this.CONNECTION_TIMEOUT);
-  }
-
-  private stopConnectionWatchdog() {
-    if (this.#connectionWatchdog != null) {
-      clearTimeout(this.#connectionWatchdog);
-      this.#connectionWatchdog = null;
-    }
-  }
-
-  private transitionToState(state: ConnectionState) {
-    if (this.#state === state) {
-      return;
-    }
-
-    this.#state = state;
-
-    if (this.#state === ConnectionState.Limbo) {
-      this.startConnectionWatchdog();
-    } else if (this.#state === ConnectionState.Connected) {
-      this.stopConnectionWatchdog();
-    }
-
-    this.dispatchEvent(new ConnectionStateChangeEvent(state));
-  }
-
-  private reconnectIfNeeded() {
-    /*
-		if (eventTarget !== this.#ws) {
-	      return;
-    	}
-		*/
-
-    if (!this.active) {
-      this.transitionToState(ConnectionState.Disconnected);
-      return;
-    }
-
-    this.transitionToState(ConnectionState.Reconnecting);
-    this.stopConnectionWatchdog();
-    this.ws.close();
-
-    setTimeout(() => {
-      if (!this.active || this.ws.isConnected()) {
-        return;
-      }
-
-      this.ws.reconnect();
-    }, this.RECONNECT_DELAY);
+    this.#ws?.handleWebSocketHeartbeatTimeout();
   }
 
   //#region Events
@@ -156,7 +87,7 @@ export class GreatWebSocket extends EventTarget implements Operator {
     listener: EventListenerOrEventListenerObject,
     options?: boolean | AddEventListenerOptions,
   ): void {
-    super.addEventListener(type, listener, options);
+    this.#ws?.addEventListener(type, listener, options);
   }
 
   removeEventListener<K extends keyof GreatWebSocketEventMap>(
@@ -164,7 +95,7 @@ export class GreatWebSocket extends EventTarget implements Operator {
     listener: EventListenerOrEventListenerObject,
     options?: boolean | EventListenerOptions,
   ): void {
-    super.removeEventListener(type, listener, options);
+    this.#ws?.removeEventListener(type, listener, options);
   }
 
   //#endregion
@@ -179,7 +110,7 @@ export class GreatWebSocket extends EventTarget implements Operator {
       this.#pendingCommands.push(cmd);
 
       cmd.promise = { resolve, reject };
-      cmd.rpcId = command.execute(this.ws);
+      cmd.rpcId = command.execute(this);
     });
   }
 
