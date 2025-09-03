@@ -63,7 +63,11 @@ export class AlwaysConnected extends EventTarget implements Operator {
     this.#active = true;
 
     this.#heartbeatTimeout = setInterval(() => {
-      if (!this.active || this.#ws == null) {
+      if (
+        !this.active ||
+        this.#state !== ConnectionState.Connected ||
+        this.#ws == null
+      ) {
         return;
       }
 
