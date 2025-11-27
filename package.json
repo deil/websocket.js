@@ -1,5 +1,5 @@
 {
-	"name": "websocket-js",
+	"name": "@deilux/websocket-js",
 	"version": "0.2.0",
 	"description": "Make WebSockets great again",
 	"main": "dist/cjs/index.js",
@@ -30,7 +30,14 @@
 		"type": "git",
 		"url": "git+https://github.com/deil/websocket.js.git"
 	},
-	"keywords": [],
+	"keywords": [
+		"websocket",
+		"ws",
+		"reconnect",
+		"auto-reconnect",
+		"realtime",
+		"rpc"
+	],
 	"author": "Anton Kosiakin <anton@kosya.club>",
 	"license": "MIT",
 	"bugs": {

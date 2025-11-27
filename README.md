@@ -2,8 +2,11 @@
 
 An abstraction over WebSockets that just works. It keeps the connection alive, self-heals from failures, and provides flexibility with application-level protocol, including the client authentication mechanism.
 
-### Status
-work-in-progress; install locally via `npm link`
+### Installation
+
+```bash
+npm install @deilux/websocket-js
+```
 
 ### Motivation
 Over the past few years, I’ve had to implement WebSocket communication many times and grew tired of the repetitive boilerplate and chasing edge cases. Many WebSocket libraries were non-starters: too complex and prone to hiding the underlying protocol behind their own abstractions. Cloud-based solutions didn’t fit either — my projects require heavy customization, and at that scale I can build and operate the infrastructure myself.
@@ -63,6 +66,95 @@ All timing is configurable via the options object:
 }
 ```
 
-### Roadmap
-- Fully encapsulate WebSocket management
-- Support for RPC-style calls
+### GreatWebSocket
+
+`GreatWebSocket` is the main class you'll use. It wraps `AlwaysConnected` and adds:
+- Convenient `send()` method with connection checking
+- RPC-style request/response via `call()` and `tryHandleAsControlMessage()`
+- Connection state events
+
+#### Basic usage
+
+```typescript
+import { GreatWebSocket, ConnectionState } from '@deilux/websocket-js';
+
+const ws = new GreatWebSocket(
+  'wss://api.example.com/ws',
+  
+  // Called when transport connects — do your handshake here
+  async () => {
+    ws.send(JSON.stringify({ type: 'auth', token: 'my-token' }));
+    // Return true when handshake succeeds
+    return true;
+  },
+  
+  // Called for every incoming message
+  (socket, ev) => {
+    const message = JSON.parse(ev.data);
+    
+    // First, check if it's an RPC response
+    if (ws.tryHandleAsControlMessage(message)) {
+      return;
+    }
+    
+    // Otherwise, handle as a regular message
+    console.log('Received:', message);
+  },
+  
+  // Called periodically to send outbound heartbeat
+  (socket, interval) => {
+    socket.send(JSON.stringify({ type: 'ping' }));
+  },
+);
+
+// Listen for state changes
+ws.addEventListener('statechange', (ev) => {
+  console.log('Connection state:', ev.state);
+});
+
+// Start the connection
+ws.activate();
+
+// Send messages (returns false if not connected)
+ws.send(JSON.stringify({ type: 'hello' }));
+
+// Stop when done
+ws.shutdown();
+```
+
+#### RPC-style commands
+
+Define commands by implementing the `RemoteCommand` interface:
+
+```typescript
+import { RemoteCommand, GreatWebSocket } from '@deilux/websocket-js';
+
+class JoinRoomCommand implements RemoteCommand {
+  private messageId = crypto.randomUUID();
+  
+  constructor(private roomId: string) {}
+  
+  execute(ws: GreatWebSocket): string {
+    ws.send(JSON.stringify({
+      id: this.messageId,
+      type: 'join_room',
+      roomId: this.roomId,
+    }));
+    return this.messageId;
+  }
+  
+  responseMatches(message: unknown): boolean {
+    return (message as any)?.id === this.messageId;
+  }
+  
+  handleResponse(message: unknown): string {
+    return (message as any).status; // Return whatever you need
+  }
+}
+
+// Usage
+const status = await ws.call(new JoinRoomCommand('room-123'));
+console.log('Joined with status:', status);
+```
+
+The `call()` method returns a Promise that resolves when a matching response arrives.
