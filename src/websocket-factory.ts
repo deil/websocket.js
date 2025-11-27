@@ -1,10 +1,11 @@
 import type { Operator } from "./keep-online";
+import { WebSocketIsh } from "./models";
 
 export const createWebSocket = (
   wsUrl: string,
   operator: Operator,
-  onMessageFn: (ws: WebSocket, ev: MessageEvent) => void,
-): WebSocket => {
+  onMessageFn: (ws: WebSocketIsh, ev: MessageEvent) => void,
+): WebSocketIsh => {
   const ws = new WebSocket(wsUrl);
   ws.onerror = (error) => {
     console.error("WS error: ", error);

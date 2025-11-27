@@ -4,6 +4,7 @@ import {
 } from "./events";
 import {
   ConnectionState,
+  WebSocketIsh,
   type ConnectionState as ConnectionStateType,
   type createWebSocketFn,
   type heartbeatFn,
@@ -16,18 +17,22 @@ export interface Operator {
   handleWebSocketHeartbeatTimeout(): void;
 }
 
+export interface AlwaysConnectedOptions {
+  heartbeatInterval: number;
+  reconnectDelay: number;
+  connectionTimeout: number;
+}
+
 export class AlwaysConnected extends EventTarget implements Operator {
-  private readonly CONNECTION_TIMEOUT = 15000;
-  private readonly RECONNECT_DELAY = 5000;
-  private readonly HEARTBEAT_INTERVAL = 15000;
 
   #active = false;
-  #ws: WebSocket | null = null;
+  #ws: WebSocketIsh | null = null;
   #state: ConnectionStateType = ConnectionState.Disconnected;
   #connectionWatchdog: ReturnType<typeof setTimeout> | null = null;
   #heartbeatTimeout: ReturnType<typeof setInterval> | null = null;
+  #connectionToken: object | null = null;
 
-  get websocket(): WebSocket | null {
+  get websocket(): WebSocketIsh | null {
     return this.#ws;
   }
 
@@ -35,6 +40,7 @@ export class AlwaysConnected extends EventTarget implements Operator {
     private readonly createWs: createWebSocketFn,
     private readonly onConnectedFn: () => Promise<boolean>,
     private readonly sendHeartbeat: heartbeatFn,
+    private readonly options: AlwaysConnectedOptions,
   ) {
     super();
   }
@@ -62,6 +68,7 @@ export class AlwaysConnected extends EventTarget implements Operator {
     }
 
     this.#active = true;
+    this.transitionToState(ConnectionState.Connecting);
 
     this.#heartbeatTimeout = setInterval(() => {
       if (
@@ -72,8 +79,8 @@ export class AlwaysConnected extends EventTarget implements Operator {
         return;
       }
 
-      this.sendHeartbeat(this.#ws, this.HEARTBEAT_INTERVAL);
-    }, this.HEARTBEAT_INTERVAL);
+      this.sendHeartbeat(this.#ws, this.options.heartbeatInterval);
+    }, this.options.heartbeatInterval);
 
     this.#ws = this.createWs();
   }
@@ -82,6 +89,7 @@ export class AlwaysConnected extends EventTarget implements Operator {
    * Shutdown - stop and disconnect the WebSocket
    */
   shutdown() {
+    this.#connectionToken = null;
     if (this.#heartbeatTimeout != null) {
       clearInterval(this.#heartbeatTimeout);
       this.#heartbeatTimeout = null;
@@ -90,12 +98,19 @@ export class AlwaysConnected extends EventTarget implements Operator {
     this.stopConnectionWatchdog();
     this.#active = false;
     this.#ws?.close();
+    this.#state = ConnectionState.Disconnected;
   }
 
   handleWebSocketOpen() {
+    const connectionToken = {};
+    this.#connectionToken = connectionToken;
     this.transitionToState(ConnectionState.Limbo);
 
     this.onConnectedFn().then((success) => {
+      if (this.#connectionToken !== connectionToken) {
+        return;
+      }
+
       if (success) {
         this.transitionToState(ConnectionState.Connected);
       }
@@ -121,7 +136,7 @@ export class AlwaysConnected extends EventTarget implements Operator {
     this.#connectionWatchdog = setTimeout(() => {
       this.dispatchEvent(new Event("connectiontimeout"));
       this.reconnectIfNeeded();
-    }, this.CONNECTION_TIMEOUT);
+    }, this.options.connectionTimeout);
   }
 
   private stopConnectionWatchdog() {
@@ -152,6 +167,7 @@ export class AlwaysConnected extends EventTarget implements Operator {
       return;
     }
 
+    this.#connectionToken = null;
     if (!this.active) {
       this.transitionToState(ConnectionState.Disconnected);
       return;
@@ -168,7 +184,7 @@ export class AlwaysConnected extends EventTarget implements Operator {
       }
 
       this.#ws = this.createWs();
-    }, this.RECONNECT_DELAY);
+    }, this.options.reconnectDelay);
   }
 
   addEventListener<K extends keyof GreatWebSocketEventMap>(

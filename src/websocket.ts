@@ -3,7 +3,7 @@ import type { PendingCommand } from "./internal";
 import { AlwaysConnected, type Operator } from "./keep-online";
 import { ConnectionState, type heartbeatFn } from "./models";
 import type { RemoteCommand } from "./rpc";
-import { createWebSocket } from "./utils";
+import { createWebSocket } from "./websocket-factory";
 
 export class GreatWebSocket implements Operator {
   #client: unknown | null = null;
@@ -30,6 +30,7 @@ export class GreatWebSocket implements Operator {
       () => createWebSocket(url, this, this.onMessageFn),
       this.onConnectedFn,
       this.sendHeartbeat,
+      { heartbeatInterval: 15000, reconnectDelay: 2000, connectionTimeout: 15000 },
     );
   }
 
@@ -99,6 +100,10 @@ export class GreatWebSocket implements Operator {
   }
 
   //#endregion
+
+  send(data: string | ArrayBufferLike | Blob | ArrayBufferView): void {
+    this.#ws?.websocket?.send(data);
+  }
 
   call(command: RemoteCommand): Promise<unknown> {
     const cmd = {

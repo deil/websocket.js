@@ -21,6 +21,7 @@ describe("AlwaysConnected", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.useFakeTimers();
     vi.clearAllTimers();
 
     mockWebSocket = new MockWebSocket();
@@ -32,585 +33,541 @@ describe("AlwaysConnected", () => {
       createWebSocketFn,
       onConnectedFn,
       sendHeartbeatFn,
+      { heartbeatInterval: 15000, reconnectDelay: 5000, connectionTimeout: 15000 },
     );
   });
 
   afterEach(() => {
     alwaysConnected.shutdown();
+    vi.useRealTimers();
   });
 
-  // Initialization tests
-  it("should initialize with correct default values", () => {
-    // Arrange & Act - already done in beforeEach
+  const waitForPendingConnection = async () => {
+    const lastIndex = onConnectedFn.mock.results.length - 1;
+    const connectPromise = onConnectedFn.mock.results[lastIndex]
+      ?.value as Promise<boolean> | undefined;
 
-    // Assert
-    expect(alwaysConnected.active).toBe(false);
-    expect(alwaysConnected.state).toBe(ConnectionState.Disconnected);
-    expect(alwaysConnected.websocket).toBeNull();
-  });
+    if (connectPromise == null) {
+      throw new Error("onConnectedFn did not return a promise");
+    }
 
-  // Activate tests
-  it("should set active to true and create WebSocket", () => {
-    // Arrange
-    expect(alwaysConnected.active).toBe(false);
+    await connectPromise;
+    await Promise.resolve();
+  };
 
-    // Act
+  const activateAndEnterLimbo = () => {
     alwaysConnected.activate();
+    alwaysConnected.handleWebSocketOpen();
+  };
 
-    // Assert
-    expect(alwaysConnected.active).toBe(true);
-    expect(createWebSocketFn).toHaveBeenCalledTimes(1);
-    expect(alwaysConnected.websocket).toBe(mockWebSocket);
+  const activateAndConnect = async () => {
+    activateAndEnterLimbo();
+    await waitForPendingConnection();
+  };
+
+  describe("initialization", () => {
+    it("starts inactive and disconnected", () => {
+      expect(alwaysConnected.active).toBe(false);
+      expect(alwaysConnected.state).toBe(ConnectionState.Disconnected);
+      expect(alwaysConnected.websocket).toBeNull();
+    });
   });
 
-  it("should throw error when activated multiple times", () => {
-    // Arrange
-    alwaysConnected.activate();
+  describe("activate()", () => {
+    it("creates a websocket and marks the operator as active", () => {
+      expect(alwaysConnected.active).toBe(false);
 
-    // Act & Assert
-    expect(() => {
       alwaysConnected.activate();
-    }).toThrow("Already active");
-    expect(createWebSocketFn).toHaveBeenCalledTimes(1);
+
+      expect(alwaysConnected.active).toBe(true);
+      expect(createWebSocketFn).toHaveBeenCalledTimes(1);
+      expect(alwaysConnected.websocket).toBe(mockWebSocket);
+    });
+
+    it("throws when called twice", () => {
+      alwaysConnected.activate();
+
+      expect(() => alwaysConnected.activate()).toThrow("Already active");
+      expect(createWebSocketFn).toHaveBeenCalledTimes(1);
+    });
   });
 
-  // Shutdown tests
-  it("should disconnect and clean up all resources completely", () => {
-    // Arrange - Set up active connection with timers
-    alwaysConnected.activate();
-    alwaysConnected.handleWebSocketOpen(); // This starts connection watchdog
+  describe("shutdown()", () => {
+    it("fully cleans up active resources", () => {
+      activateAndEnterLimbo();
 
-    // Act
-    alwaysConnected.shutdown();
+      alwaysConnected.shutdown();
 
-    // Assert - Verify complete resource cleanup
-    expect(alwaysConnected.active).toBe(false);
-    expect(mockWebSocket.close).toHaveBeenCalledTimes(1);
+      expect(alwaysConnected.active).toBe(false);
+      expect(mockWebSocket.close).toHaveBeenCalledTimes(1);
 
-    // Verify timers are cleared (we can't directly test internal timers,
-    // but we can verify the connection watchdog is stopped)
-    const timeoutHandler = vi.fn();
-    alwaysConnected.addEventListener("connectiontimeout", timeoutHandler);
-    vi.advanceTimersByTime(20000); // Beyond CONNECTION_TIMEOUT
-    expect(timeoutHandler).not.toHaveBeenCalled(); // Should not fire if cleaned up
+      const timeoutHandler = vi.fn();
+      alwaysConnected.addEventListener("connectiontimeout", timeoutHandler);
+      vi.advanceTimersByTime(20000);
+      expect(timeoutHandler).not.toHaveBeenCalled();
+    });
+
+    it("can be called repeatedly", () => {
+      alwaysConnected.activate();
+
+      alwaysConnected.shutdown();
+      alwaysConnected.shutdown();
+
+      expect(alwaysConnected.active).toBe(false);
+      expect(mockWebSocket.close).toHaveBeenCalledTimes(2);
+    });
+
+    it("cleans up when invoked during reconnection", () => {
+      alwaysConnected.activate();
+      alwaysConnected.handleWebSocketError(mockWebSocket as any);
+
+      alwaysConnected.shutdown();
+
+      expect(alwaysConnected.active).toBe(false);
+    });
+
+    it("allows a fresh activation afterwards", async () => {
+      activateAndEnterLimbo();
+      await Promise.resolve();
+      alwaysConnected.shutdown();
+
+      alwaysConnected.activate();
+
+      expect(alwaysConnected.active).toBe(true);
+      expect(alwaysConnected.state).toBe(ConnectionState.Connecting);
+      expect(createWebSocketFn).toHaveBeenCalledTimes(2);
+    });
   });
 
-  it("should be safe to call multiple times", () => {
-    // Arrange
-    alwaysConnected.activate();
+  describe("handleWebSocketOpen()", () => {
+    it("moves into Limbo and emits a state change", () => {
+      const stateChangeHandler = vi.fn();
+      alwaysConnected.addEventListener("statechange", stateChangeHandler);
 
-    // Act
-    alwaysConnected.shutdown();
-    alwaysConnected.shutdown();
+      alwaysConnected.handleWebSocketOpen();
 
-    // Assert
-    expect(alwaysConnected.active).toBe(false);
-    expect(mockWebSocket.close).toHaveBeenCalledTimes(2); // Each shutdown closes current WebSocket
+      expect(alwaysConnected.state).toBe(ConnectionState.Limbo);
+      expect(stateChangeHandler).toHaveBeenCalledWith(
+        expect.any(ConnectionStateChangeEvent),
+      );
+      expect(stateChangeHandler.mock.calls[0][0].state).toBe(
+        ConnectionState.Limbo,
+      );
+    });
+
+    it("starts the onConnected handshake", () => {
+      alwaysConnected.handleWebSocketOpen();
+
+      expect(alwaysConnected.state).toBe(ConnectionState.Limbo);
+      expect(onConnectedFn).toHaveBeenCalledTimes(1);
+    });
+
+    it("transitions to Connected once the handshake succeeds", async () => {
+      const stateChangeHandler = vi.fn();
+      alwaysConnected.addEventListener("statechange", stateChangeHandler);
+
+      alwaysConnected.handleWebSocketOpen();
+      await waitForPendingConnection();
+
+      expect(onConnectedFn).toHaveBeenCalledTimes(1);
+      expect(alwaysConnected.state).toBe(ConnectionState.Connected);
+      expect(stateChangeHandler).toHaveBeenCalledTimes(2);
+      expect(stateChangeHandler.mock.calls[1][0].state).toBe(
+        ConnectionState.Connected,
+      );
+    });
+
+    it("falls back to Reconnecting when the handshake fails", () => {
+      onConnectedFn.mockResolvedValue(false);
+      const stateChangeHandler = vi.fn();
+      alwaysConnected.addEventListener("statechange", stateChangeHandler);
+
+      activateAndEnterLimbo();
+      vi.advanceTimersByTime(15000);
+
+      expect(onConnectedFn).toHaveBeenCalledTimes(1);
+      expect(alwaysConnected.state).toBe(ConnectionState.Reconnecting);
+      expect(stateChangeHandler).toHaveBeenCalledTimes(3);
+    });
+
+    it("ignores stale onConnected resolutions once a reconnect starts", async () => {
+      let resolveConnected!: (value: boolean) => void;
+      onConnectedFn.mockImplementationOnce(
+        () =>
+          new Promise<boolean>((resolve) => {
+            resolveConnected = resolve;
+          }),
+      );
+
+      activateAndEnterLimbo();
+      const pendingPromise = onConnectedFn.mock.results[0]?.value as
+        | Promise<boolean>
+        | undefined;
+
+      if (pendingPromise == null) {
+        throw new Error("Missing connection promise");
+      }
+
+      if (typeof resolveConnected !== "function") {
+        throw new Error("Missing connection resolver");
+      }
+
+      alwaysConnected.handleWebSocketError(mockWebSocket as any);
+      expect(alwaysConnected.state).toBe(ConnectionState.Reconnecting);
+
+      resolveConnected(true);
+      await pendingPromise;
+      await Promise.resolve();
+
+      expect(alwaysConnected.state).toBe(ConnectionState.Reconnecting);
+    });
   });
 
-  it("should clean up resources even when called during reconnection", () => {
-    // Arrange
-    alwaysConnected.activate();
-    alwaysConnected.handleWebSocketError(mockWebSocket as any); // Start reconnection
+  describe("handleWebSocketError()", () => {
+    it("reconnects the current socket when active", () => {
+      alwaysConnected.activate();
+      const oldWebSocket = alwaysConnected.websocket;
 
-    // Act
-    alwaysConnected.shutdown();
+      alwaysConnected.handleWebSocketError(mockWebSocket as any);
 
-    // Assert
-    expect(alwaysConnected.active).toBe(false);
-    // Note: State may remain in current state during shutdown
-    // WebSocket reference may be kept for cleanup purposes
+      expect(alwaysConnected.state).toBe(ConnectionState.Reconnecting);
+      expect(oldWebSocket?.close).toHaveBeenCalledTimes(1);
+    });
+
+    it("ignores errors from stale sockets", () => {
+      alwaysConnected.activate();
+      const oldWebSocket = alwaysConnected.websocket;
+      alwaysConnected.handleWebSocketError(mockWebSocket as any);
+      const newWebSocket = alwaysConnected.websocket;
+
+      alwaysConnected.handleWebSocketError(oldWebSocket as any);
+
+      expect(alwaysConnected.state).toBe(ConnectionState.Reconnecting);
+      expect(newWebSocket).not.toBe(oldWebSocket);
+    });
+
+    it("ignores completely different WebSocket instances", () => {
+      alwaysConnected.activate();
+      const firstWebSocket = alwaysConnected.websocket;
+      const differentWebSocket = new MockWebSocket();
+
+      alwaysConnected.handleWebSocketError(differentWebSocket as any);
+      alwaysConnected.handleWebSocketClosed(differentWebSocket as any);
+
+      expect(alwaysConnected.state).toBe(ConnectionState.Connecting);
+      expect(alwaysConnected.websocket).toBe(firstWebSocket);
+    });
+
+    it("forces reconnection even when already in Limbo", () => {
+      activateAndEnterLimbo();
+
+      alwaysConnected.handleWebSocketError(mockWebSocket as any);
+
+      expect(alwaysConnected.state).toBe(ConnectionState.Reconnecting);
+    });
   });
 
-  // handleWebSocketOpen tests
-  it("should transition to Limbo state and start connection watchdog", () => {
-    // Arrange
-    const stateChangeHandler = vi.fn();
-    alwaysConnected.addEventListener("statechange", stateChangeHandler);
+  describe("handleWebSocketClosed()", () => {
+    it("reconnects when the current socket closes", () => {
+      alwaysConnected.activate();
 
-    // Act
-    alwaysConnected.handleWebSocketOpen();
+      alwaysConnected.handleWebSocketClosed(mockWebSocket as any);
 
-    // Assert
-    expect(alwaysConnected.state).toBe(ConnectionState.Limbo);
-    expect(stateChangeHandler).toHaveBeenCalledWith(
-      expect.any(ConnectionStateChangeEvent),
-    );
-    expect(stateChangeHandler.mock.calls[0][0].state).toBe(
-      ConnectionState.Limbo,
-    );
+      expect(alwaysConnected.state).toBe(ConnectionState.Reconnecting);
+    });
+
+    it("ignores close events from stale sockets", () => {
+      alwaysConnected.activate();
+      const oldWebSocket = alwaysConnected.websocket;
+      alwaysConnected.handleWebSocketError(mockWebSocket as any);
+
+      alwaysConnected.handleWebSocketClosed(oldWebSocket as any);
+
+      expect(alwaysConnected.state).toBe(ConnectionState.Reconnecting);
+    });
+
+    it("ignores close events from unrelated sockets", () => {
+      alwaysConnected.activate();
+      const currentWebSocket = alwaysConnected.websocket;
+      const staleWebSocket = new MockWebSocket();
+
+      alwaysConnected.handleWebSocketClosed(staleWebSocket as any);
+
+      expect(alwaysConnected.state).toBe(ConnectionState.Connecting);
+      expect(alwaysConnected.websocket).toBe(currentWebSocket);
+    });
   });
 
-  it("should call onConnectedFn when entering Limbo state", async () => {
-    // Arrange
-    const stateChangeHandler = vi.fn();
-    alwaysConnected.addEventListener("statechange", stateChangeHandler);
+  describe("handleWebSocketHeartbeatTimeout()", () => {
+    it("initiates reconnection when active", () => {
+      alwaysConnected.activate();
 
-    // Act
-    alwaysConnected.handleWebSocketOpen();
+      alwaysConnected.handleWebSocketHeartbeatTimeout();
 
-    // Assert - onConnectedFn should be called when entering Limbo
-    expect(alwaysConnected.state).toBe(ConnectionState.Limbo);
-    // The onConnectedFn call happens asynchronously, so we check it was set up to be called
+      expect(alwaysConnected.state).toBe(ConnectionState.Reconnecting);
+    });
+
+    it("is a no-op when inactive", () => {
+      const initialState = alwaysConnected.state;
+      const stateChangeHandler = vi.fn();
+      alwaysConnected.addEventListener("statechange", stateChangeHandler);
+
+      alwaysConnected.handleWebSocketHeartbeatTimeout();
+
+      expect(alwaysConnected.state).toBe(initialState);
+      expect(stateChangeHandler).not.toHaveBeenCalled();
+    });
+
+    it("reconnects from any active state (Limbo scenario)", () => {
+      activateAndEnterLimbo();
+
+      alwaysConnected.handleWebSocketHeartbeatTimeout();
+
+      expect(alwaysConnected.state).toBe(ConnectionState.Reconnecting);
+    });
   });
 
-  it("should call onConnectedFn and transition to Connected on success", async () => {
-    // Arrange
-    const stateChangeHandler = vi.fn();
-    alwaysConnected.addEventListener("statechange", stateChangeHandler);
+  describe("connection watchdog", () => {
+    it("dispatches connectiontimeout after the deadline", () => {
+      activateAndEnterLimbo();
+      const timeoutHandler = vi.fn();
+      alwaysConnected.addEventListener("connectiontimeout", timeoutHandler);
 
-    // Act
-    alwaysConnected.handleWebSocketOpen();
-    await vi.runAllTimersAsync();
+      vi.advanceTimersByTime(15000);
 
-    // Assert
-    expect(onConnectedFn).toHaveBeenCalledTimes(1);
-    expect(alwaysConnected.state).toBe(ConnectionState.Connected);
-    expect(stateChangeHandler).toHaveBeenCalledTimes(2);
-    expect(stateChangeHandler.mock.calls[1][0].state).toBe(
-      ConnectionState.Connected,
-    );
+      expect(timeoutHandler).toHaveBeenCalledTimes(1);
+      expect(alwaysConnected.state).toBe(ConnectionState.Reconnecting);
+    });
+
+    it("times out if Limbo never resolves", () => {
+      activateAndEnterLimbo();
+      const timeoutHandler = vi.fn();
+      alwaysConnected.addEventListener("connectiontimeout", timeoutHandler);
+
+      vi.advanceTimersByTime(15000);
+
+      expect(timeoutHandler).toHaveBeenCalledTimes(1);
+      expect(alwaysConnected.state).toBe(ConnectionState.Reconnecting);
+    });
+
+    it("stops once shutdown runs", () => {
+      activateAndEnterLimbo();
+      const timeoutHandler = vi.fn();
+      alwaysConnected.addEventListener("connectiontimeout", timeoutHandler);
+
+      alwaysConnected.shutdown();
+      vi.advanceTimersByTime(15000);
+
+      expect(timeoutHandler).not.toHaveBeenCalled();
+    });
   });
 
-  it("should trigger reconnection if onConnectedFn fails within timeout", async () => {
-    // Arrange
-    onConnectedFn.mockResolvedValue(false);
-    const stateChangeHandler = vi.fn();
-    alwaysConnected.addEventListener("statechange", stateChangeHandler);
+  describe("heartbeat scheduling", () => {
+    it("does not send heartbeats when inactive", () => {
+      alwaysConnected.activate();
+      alwaysConnected.shutdown();
 
-    // Act
-    alwaysConnected.activate(); // Must be active for reconnection
-    alwaysConnected.handleWebSocketOpen();
-    vi.advanceTimersByTime(15000); // Wait for connection timeout
+      vi.advanceTimersByTime(15000);
 
-    // Assert
-    expect(onConnectedFn).toHaveBeenCalledTimes(1);
-    expect(alwaysConnected.state).toBe(ConnectionState.Reconnecting);
-    expect(stateChangeHandler).toHaveBeenCalledTimes(2); // Limbo -> Reconnecting
+      expect(sendHeartbeatFn).not.toHaveBeenCalled();
+    });
+
+    it("sends heartbeats when connected", async () => {
+      await activateAndConnect();
+
+      vi.advanceTimersByTime(15000);
+
+      expect(sendHeartbeatFn).toHaveBeenCalledTimes(1);
+      expect(sendHeartbeatFn).toHaveBeenCalledWith(mockWebSocket, 15000);
+    });
+
+    it("skips heartbeats when the socket reference is null", () => {
+      alwaysConnected.activate();
+      alwaysConnected.shutdown();
+
+      vi.advanceTimersByTime(15000);
+
+      expect(sendHeartbeatFn).not.toHaveBeenCalled();
+    });
   });
 
-  // handleWebSocketError tests
-  it("should trigger reconnection when active", () => {
-    // Arrange
-    alwaysConnected.activate();
-    const oldWebSocket = alwaysConnected.websocket;
+  describe("reconnection scheduling", () => {
+    it("cleans up like shutdown before scheduling reconnect", () => {
+      activateAndEnterLimbo();
 
-    // Act
-    alwaysConnected.handleWebSocketError(mockWebSocket as any);
+      alwaysConnected.handleWebSocketError(mockWebSocket as any);
 
-    // Assert
-    expect(alwaysConnected.state).toBe(ConnectionState.Reconnecting);
-    expect(oldWebSocket?.close).toHaveBeenCalledTimes(1);
+      expect(mockWebSocket.close).toHaveBeenCalledTimes(1);
+      const timeoutHandler = vi.fn();
+      alwaysConnected.addEventListener("connectiontimeout", timeoutHandler);
+      vi.advanceTimersByTime(20000);
+      expect(timeoutHandler).not.toHaveBeenCalled();
+    });
+
+    it("skips creating a new socket when one already exists", () => {
+      const secondMockWs = new MockWebSocket();
+      createWebSocketFn
+        .mockReturnValueOnce(mockWebSocket as any)
+        .mockReturnValueOnce(secondMockWs as any);
+
+      alwaysConnected.activate();
+      alwaysConnected.handleWebSocketError(mockWebSocket as any);
+
+      vi.advanceTimersByTime(1000);
+      alwaysConnected.handleWebSocketHeartbeatTimeout();
+
+      vi.advanceTimersByTime(4000);
+      expect(createWebSocketFn).toHaveBeenCalledTimes(2);
+      expect(alwaysConnected.websocket).toBe(secondMockWs);
+
+      vi.advanceTimersByTime(5000);
+
+      expect(createWebSocketFn).toHaveBeenCalledTimes(2);
+    });
+
+    it("does not reconnect while inactive", () => {
+      alwaysConnected.activate();
+      alwaysConnected.shutdown();
+
+      alwaysConnected.handleWebSocketError(mockWebSocket as any);
+      vi.advanceTimersByTime(5000);
+
+      expect(createWebSocketFn).toHaveBeenCalledTimes(1);
+    });
   });
 
-  it("should ignore errors from old WebSocket instances when active", () => {
-    // Arrange
-    alwaysConnected.activate();
-    const oldWebSocket = alwaysConnected.websocket;
-    alwaysConnected.handleWebSocketError(mockWebSocket as any); // Trigger error to get to Reconnecting
-    const newWebSocket = alwaysConnected.websocket;
+  describe("state change events", () => {
+    it("emits events for real transitions only", () => {
+      const stateChangeHandler = vi.fn();
+      alwaysConnected.addEventListener("statechange", stateChangeHandler);
 
-    // Act - try to trigger error from old WebSocket
-    alwaysConnected.handleWebSocketError(oldWebSocket as any);
+      alwaysConnected.activate();
+      alwaysConnected.handleWebSocketOpen();
 
-    // Assert - should be ignored because it's from old WebSocket
-    expect(alwaysConnected.state).toBe(ConnectionState.Reconnecting);
+      expect(stateChangeHandler).toHaveBeenCalledTimes(2);
+      expect(stateChangeHandler.mock.calls[0][0].state).toBe(
+        ConnectionState.Connecting,
+      );
+      expect(stateChangeHandler.mock.calls[1][0].state).toBe(
+        ConnectionState.Limbo,
+      );
+    });
+
+    it("suppresses duplicate transition events", () => {
+      const stateChangeHandler = vi.fn();
+      alwaysConnected.addEventListener("statechange", stateChangeHandler);
+
+      alwaysConnected.activate();
+      alwaysConnected.handleWebSocketError(mockWebSocket as any);
+      alwaysConnected.handleWebSocketError(alwaysConnected.websocket as any);
+
+      expect(stateChangeHandler).toHaveBeenCalledTimes(2);
+      expect(stateChangeHandler.mock.calls[0][0].state).toBe(
+        ConnectionState.Connecting,
+      );
+      expect(stateChangeHandler.mock.calls[1][0].state).toBe(
+        ConnectionState.Reconnecting,
+      );
+    });
   });
 
-  it("should only respond to events from current WebSocket instance", () => {
-    // Arrange
-    alwaysConnected.activate();
-    const firstWebSocket = alwaysConnected.websocket;
+  describe("EventTarget integration", () => {
+    it("registers and removes listeners", () => {
+      const listener = vi.fn();
 
-    // Create a completely different WebSocket instance (simulate old connection)
-    const differentWebSocket = new MockWebSocket();
+      alwaysConnected.addEventListener("statechange", listener);
+      alwaysConnected.handleWebSocketOpen();
+      alwaysConnected.removeEventListener("statechange", listener);
+      alwaysConnected.handleWebSocketClosed(mockWebSocket as any);
 
-    // Act - Send events from different WebSocket
-    alwaysConnected.handleWebSocketError(differentWebSocket as any);
-    alwaysConnected.handleWebSocketClosed(differentWebSocket as any);
+      expect(listener).toHaveBeenCalledTimes(1);
+    });
 
-    // Assert - Should ignore events from different WebSocket instances
-    expect(alwaysConnected.state).toBe(ConnectionState.Disconnected); // Should not have changed
-    expect(alwaysConnected.websocket).toBe(firstWebSocket);
+    it("supports typed listeners", () => {
+      const stateChangeListener = vi.fn();
+      const timeoutListener = vi.fn();
+
+      alwaysConnected.addEventListener("statechange", stateChangeListener);
+      alwaysConnected.addEventListener("connectiontimeout", timeoutListener);
+
+      alwaysConnected.handleWebSocketOpen();
+
+      expect(stateChangeListener).toHaveBeenCalledTimes(1);
+      expect(timeoutListener).not.toHaveBeenCalled();
+    });
   });
 
-  // handleWebSocketClosed tests
-  it("should trigger reconnection when active", () => {
-    // Arrange
-    alwaysConnected.activate();
-
-    // Act
-    alwaysConnected.handleWebSocketClosed(mockWebSocket as any);
-
-    // Assert
-    expect(alwaysConnected.state).toBe(ConnectionState.Reconnecting);
-  });
-
-  it("should ignore close events from old WebSocket instances when active", () => {
-    // Arrange
-    alwaysConnected.activate();
-    const oldWebSocket = alwaysConnected.websocket;
-    alwaysConnected.handleWebSocketError(mockWebSocket as any); // Trigger error to get to Reconnecting
-    const newWebSocket = alwaysConnected.websocket;
-
-    // Act - try to trigger close from old WebSocket
-    alwaysConnected.handleWebSocketClosed(oldWebSocket as any);
-
-    // Assert - should be ignored because it's from old WebSocket
-    expect(alwaysConnected.state).toBe(ConnectionState.Reconnecting);
-  });
-
-  it("should ignore close events from completely different WebSocket instances", () => {
-    // Arrange
-    alwaysConnected.activate();
-    const currentWebSocket = alwaysConnected.websocket;
-
-    // Create a completely different WebSocket instance (simulate stale connection)
-    const staleWebSocket = new MockWebSocket();
-
-    // Act - Try to close with stale WebSocket
-    alwaysConnected.handleWebSocketClosed(staleWebSocket as any);
-
-    // Assert - Should ignore the stale WebSocket event
-    expect(alwaysConnected.state).toBe(ConnectionState.Disconnected); // Unchanged
-    expect(alwaysConnected.websocket).toBe(currentWebSocket);
-  });
-
-  // handleWebSocketHeartbeatTimeout tests
-  it("should trigger reconnection when active", () => {
-    // Arrange
-    alwaysConnected.activate();
-
-    // Act
-    alwaysConnected.handleWebSocketHeartbeatTimeout();
-
-    // Assert
-    expect(alwaysConnected.state).toBe(ConnectionState.Reconnecting);
-  });
-
-  it("should be a no-op when inactive", () => {
-    // Arrange
-    const initialState = alwaysConnected.state;
-    const stateChangeHandler = vi.fn();
-    alwaysConnected.addEventListener("statechange", stateChangeHandler);
-
-    // Act
-    alwaysConnected.handleWebSocketHeartbeatTimeout();
-
-    // Assert
-    // When inactive, heartbeat timeout should be ignored
-    expect(alwaysConnected.state).toBe(initialState);
-    expect(stateChangeHandler).not.toHaveBeenCalled();
-  });
-
-  it("should trigger reconnection from Limbo state when active", () => {
-    // Arrange
-    alwaysConnected.activate();
-    alwaysConnected.handleWebSocketOpen();
-    expect(alwaysConnected.state).toBe(ConnectionState.Limbo);
-
-    // Act - Error occurs while in Limbo
-    alwaysConnected.handleWebSocketError(mockWebSocket as any);
-
-    // Assert
-    expect(alwaysConnected.state).toBe(ConnectionState.Reconnecting);
-  });
-
-  it("should trigger heartbeat timeout reconnection from any active state", () => {
-    // Arrange - Test from Limbo state
-    alwaysConnected.activate();
-    alwaysConnected.handleWebSocketOpen();
-    expect(alwaysConnected.state).toBe(ConnectionState.Limbo);
-
-    // Act
-    alwaysConnected.handleWebSocketHeartbeatTimeout();
-
-    // Assert
-    expect(alwaysConnected.state).toBe(ConnectionState.Reconnecting);
-  });
-
-  // Connection watchdog tests
-  it("should dispatch connectiontimeout event after timeout", () => {
-    // Arrange
-    alwaysConnected.activate();
-    alwaysConnected.handleWebSocketOpen(); // Starts watchdog
-    const timeoutHandler = vi.fn();
-    alwaysConnected.addEventListener("connectiontimeout", timeoutHandler);
-
-    // Act
-    vi.advanceTimersByTime(15000); // CONNECTION_TIMEOUT
-
-    // Assert
-    expect(timeoutHandler).toHaveBeenCalledTimes(1);
-    expect(alwaysConnected.state).toBe(ConnectionState.Reconnecting);
-  });
-
-  it("should timeout when connection fails in limbo state", () => {
-    // Arrange
-    alwaysConnected.activate();
-    alwaysConnected.handleWebSocketOpen();
-    const timeoutHandler = vi.fn();
-    alwaysConnected.addEventListener("connectiontimeout", timeoutHandler);
-
-    // Assert: Watchdog is active
-    expect(alwaysConnected.state).toBe(ConnectionState.Limbo);
-
-    // Act: Advance time to trigger watchdog timeout
-    vi.advanceTimersByTime(15000);
-
-    // Assert: Watchdog should fire and transition to reconnecting
-    expect(timeoutHandler).toHaveBeenCalledTimes(1);
-    expect(alwaysConnected.state).toBe(ConnectionState.Reconnecting);
-  });
-
-  it("should be stopped on shutdown", () => {
-    // Arrange
-    alwaysConnected.activate();
-    alwaysConnected.handleWebSocketOpen();
-    const timeoutHandler = vi.fn();
-    alwaysConnected.addEventListener("connectiontimeout", timeoutHandler);
-
-    // Act
-    alwaysConnected.shutdown();
-    vi.advanceTimersByTime(15000);
-
-    // Assert
-    expect(timeoutHandler).not.toHaveBeenCalled();
-  });
-
-  // Heartbeat functionality tests
-  it("should not send heartbeat when not active", () => {
-    // Arrange
-    alwaysConnected.activate();
-    alwaysConnected.shutdown();
-
-    // Act
-    vi.advanceTimersByTime(15000);
-
-    // Assert
-    expect(sendHeartbeatFn).not.toHaveBeenCalled();
-  });
-
-  // Reconnection logic tests
-  it("should clean up resources during reconnection (like shutdown)", () => {
-    // Arrange
-    alwaysConnected.activate();
-    alwaysConnected.handleWebSocketOpen(); // This starts connection watchdog
-
-    // Act - Trigger reconnection
-    alwaysConnected.handleWebSocketError(mockWebSocket as any);
-
-    // Assert - Should clean up like shutdown does
-    expect(mockWebSocket.close).toHaveBeenCalledTimes(1);
-
-    // Verify connection watchdog is stopped
-    const timeoutHandler = vi.fn();
-    alwaysConnected.addEventListener("connectiontimeout", timeoutHandler);
-    vi.advanceTimersByTime(20000); // Beyond CONNECTION_TIMEOUT
-    expect(timeoutHandler).not.toHaveBeenCalled(); // Should not fire if cleaned up
-  });
-
-  it("should not reconnect if not active", () => {
-    // Arrange
-    alwaysConnected.activate();
-    alwaysConnected.shutdown();
-
-    // Act
-    alwaysConnected.handleWebSocketError(mockWebSocket as any);
-    vi.advanceTimersByTime(5000);
-
-    // Assert - Should not create new socket when inactive
-    expect(createWebSocketFn).toHaveBeenCalledTimes(1);
-  });
-
-  // State transitions tests
-  it("should dispatch statechange events for transitions", () => {
-    // Arrange
-    const stateChangeHandler = vi.fn();
-    alwaysConnected.addEventListener("statechange", stateChangeHandler);
-
-    // Act
-    alwaysConnected.activate(); // Creates WebSocket, no state change yet
-    alwaysConnected.handleWebSocketOpen(); // To Limbo
-
-    // Assert
-    expect(stateChangeHandler).toHaveBeenCalledTimes(1);
-    expect(stateChangeHandler.mock.calls[0][0].state).toBe(
-      ConnectionState.Limbo,
-    );
-  });
-
-  it("should not dispatch event when transitioning to same state", () => {
-    // Arrange
-    const stateChangeHandler = vi.fn();
-    alwaysConnected.addEventListener("statechange", stateChangeHandler);
-
-    // Act
-    alwaysConnected.activate();
-    alwaysConnected.handleWebSocketError(mockWebSocket as any); // To Reconnecting
-    alwaysConnected.handleWebSocketError(alwaysConnected.websocket as any); // Try to go to Reconnecting again
-
-    // Assert
-    expect(stateChangeHandler).toHaveBeenCalledTimes(1);
-    expect(stateChangeHandler.mock.calls[0][0].state).toBe(
-      ConnectionState.Reconnecting,
-    );
-  });
-
-  // Event listener methods tests
-  it("should properly add and remove event listeners", () => {
-    // Arrange
-    const listener = vi.fn();
-
-    // Act
-    alwaysConnected.addEventListener("statechange", listener);
-    alwaysConnected.handleWebSocketOpen();
-    alwaysConnected.removeEventListener("statechange", listener);
-    alwaysConnected.handleWebSocketClosed(mockWebSocket as any);
-
-    // Assert
-    expect(listener).toHaveBeenCalledTimes(1);
-  });
-
-  it("should support typed event listeners", () => {
-    // Arrange
-    const stateChangeListener = vi.fn();
-    const timeoutListener = vi.fn();
-
-    // Act
-    alwaysConnected.addEventListener("statechange", stateChangeListener);
-    alwaysConnected.addEventListener("connectiontimeout", timeoutListener);
-
-    alwaysConnected.handleWebSocketOpen();
-
-    // Assert
-    expect(stateChangeListener).toHaveBeenCalledTimes(1);
-    expect(timeoutListener).not.toHaveBeenCalled();
-  });
-
-  // Finite state machine scenarios tests
-  it("should complete basic connection lifecycle", () => {
-    // Arrange
-    const stateChangeHandler = vi.fn();
-    alwaysConnected.addEventListener("statechange", stateChangeHandler);
-
-    // Act: Activate
-    alwaysConnected.activate();
-
-    // Assert: Should create WebSocket and be in initial state
-    expect(alwaysConnected.active).toBe(true);
-    expect(alwaysConnected.websocket).toBeDefined();
-
-    // Act: WebSocket opens
-    alwaysConnected.handleWebSocketOpen();
-
-    // Assert: Should be in Limbo state waiting for onConnectedFn
-    expect(alwaysConnected.state).toBe(ConnectionState.Limbo);
-    expect(stateChangeHandler).toHaveBeenCalledTimes(1);
-    expect(stateChangeHandler.mock.calls[0][0].state).toBe(
-      ConnectionState.Limbo,
-    );
-
-    // Act: Deactivate
-    alwaysConnected.shutdown();
-
-    // Assert: Should be cleanly shut down
-    // Note: State may remain in current state during shutdown
-    expect(alwaysConnected.active).toBe(false);
-    // WebSocket reference may be kept for cleanup purposes
-  });
-
-  it("should handle error and start reconnection", () => {
-    // Arrange
-    const stateChangeHandler = vi.fn();
-    alwaysConnected.addEventListener("statechange", stateChangeHandler);
-
-    // Act: Connect and then error occurs
-    alwaysConnected.activate();
-    alwaysConnected.handleWebSocketOpen();
-
-    // Assert: In Limbo state
-    expect(alwaysConnected.state).toBe(ConnectionState.Limbo);
-
-    // Act: Error occurs during connection
-    alwaysConnected.handleWebSocketError(mockWebSocket as any);
-
-    // Assert: Should start reconnecting
-    expect(alwaysConnected.state).toBe(ConnectionState.Reconnecting);
-    expect(stateChangeHandler).toHaveBeenCalledTimes(2); // Limbo → Reconnecting
-  });
-
-  it("should handle heartbeat timeout when active", () => {
-    // Arrange
-    const stateChangeHandler = vi.fn();
-    alwaysConnected.addEventListener("statechange", stateChangeHandler);
-
-    // Act: Connect
-    alwaysConnected.activate();
-    alwaysConnected.handleWebSocketOpen();
-
-    // Assert: In Limbo state
-    expect(alwaysConnected.state).toBe(ConnectionState.Limbo);
-
-    // Act: Heartbeat timeout occurs
-    alwaysConnected.handleWebSocketHeartbeatTimeout();
-
-    // Assert: Should start reconnecting
-    expect(alwaysConnected.state).toBe(ConnectionState.Reconnecting);
-    expect(stateChangeHandler).toHaveBeenCalledTimes(2); // Limbo → Reconnecting
-  });
-
-  it("should handle connection failure in limbo state (watchdog timeout)", () => {
-    // Arrange
-    const stateChangeHandler = vi.fn();
-    const timeoutHandler = vi.fn();
-    alwaysConnected.addEventListener("statechange", stateChangeHandler);
-    alwaysConnected.addEventListener("connectiontimeout", timeoutHandler);
-
-    // Act: Start connection that fails
-    alwaysConnected.activate();
-    alwaysConnected.handleWebSocketOpen();
-    onConnectedFn.mockResolvedValue(false); // Connection fails
-
-    // Let watchdog timeout
-    vi.advanceTimersByTime(15000);
-
-    // Assert: Should transition to reconnecting
-    expect(alwaysConnected.state).toBe(ConnectionState.Reconnecting);
-    expect(timeoutHandler).toHaveBeenCalledTimes(1);
-  });
-
-  it("should handle shutdown during reconnection", () => {
-    // Arrange
-    const stateChangeHandler = vi.fn();
-    alwaysConnected.addEventListener("statechange", stateChangeHandler);
-
-    // Act: Connect, error, start reconnecting, then shutdown
-    alwaysConnected.activate();
-    alwaysConnected.handleWebSocketOpen();
-
-    alwaysConnected.handleWebSocketError(mockWebSocket as any);
-    expect(alwaysConnected.state).toBe(ConnectionState.Reconnecting);
-
-    // Shutdown during reconnection
-    alwaysConnected.shutdown();
-
-    // Assert: Should be cleanly shut down
-    // Note: State may remain in current state during shutdown
-    expect(alwaysConnected.active).toBe(false);
-    // WebSocket reference may be kept for cleanup purposes
-  });
-
-  // Edge cases tests
-  it("should handle null WebSocket in heartbeat", () => {
-    // Arrange
-    alwaysConnected.activate();
-    alwaysConnected.shutdown(); // This should clear WebSocket
-
-    // Act
-    vi.advanceTimersByTime(15000);
-
-    // Assert
-    expect(sendHeartbeatFn).not.toHaveBeenCalled();
+  describe("integration scenarios", () => {
+    it("runs through the basic lifecycle", () => {
+      const stateChangeHandler = vi.fn();
+      alwaysConnected.addEventListener("statechange", stateChangeHandler);
+
+      alwaysConnected.activate();
+      expect(alwaysConnected.active).toBe(true);
+      expect(alwaysConnected.websocket).toBeDefined();
+
+      alwaysConnected.handleWebSocketOpen();
+      expect(alwaysConnected.state).toBe(ConnectionState.Limbo);
+      expect(stateChangeHandler).toHaveBeenCalledTimes(2);
+      expect(stateChangeHandler.mock.calls[1][0].state).toBe(
+        ConnectionState.Limbo,
+      );
+
+      alwaysConnected.shutdown();
+      expect(alwaysConnected.active).toBe(false);
+    });
+
+    it("handles errors by starting reconnection", () => {
+      const stateChangeHandler = vi.fn();
+      alwaysConnected.addEventListener("statechange", stateChangeHandler);
+
+      activateAndEnterLimbo();
+      expect(alwaysConnected.state).toBe(ConnectionState.Limbo);
+
+      alwaysConnected.handleWebSocketError(mockWebSocket as any);
+
+      expect(alwaysConnected.state).toBe(ConnectionState.Reconnecting);
+      expect(stateChangeHandler).toHaveBeenCalledTimes(3);
+    });
+
+    it("handles heartbeat timeouts while active", () => {
+      const stateChangeHandler = vi.fn();
+      alwaysConnected.addEventListener("statechange", stateChangeHandler);
+
+      activateAndEnterLimbo();
+      expect(alwaysConnected.state).toBe(ConnectionState.Limbo);
+
+      alwaysConnected.handleWebSocketHeartbeatTimeout();
+
+      expect(alwaysConnected.state).toBe(ConnectionState.Reconnecting);
+      expect(stateChangeHandler).toHaveBeenCalledTimes(3);
+    });
+
+    it("handles watchdog timeouts while in Limbo", () => {
+      const stateChangeHandler = vi.fn();
+      const timeoutHandler = vi.fn();
+      alwaysConnected.addEventListener("statechange", stateChangeHandler);
+      alwaysConnected.addEventListener("connectiontimeout", timeoutHandler);
+
+      activateAndEnterLimbo();
+      onConnectedFn.mockResolvedValue(false);
+      vi.advanceTimersByTime(15000);
+
+      expect(alwaysConnected.state).toBe(ConnectionState.Reconnecting);
+      expect(timeoutHandler).toHaveBeenCalledTimes(1);
+    });
+
+    it("can shut down safely during reconnection", () => {
+      const stateChangeHandler = vi.fn();
+      alwaysConnected.addEventListener("statechange", stateChangeHandler);
+
+      activateAndEnterLimbo();
+      alwaysConnected.handleWebSocketError(mockWebSocket as any);
+      expect(alwaysConnected.state).toBe(ConnectionState.Reconnecting);
+
+      alwaysConnected.shutdown();
+
+      expect(alwaysConnected.active).toBe(false);
+    });
   });
 });

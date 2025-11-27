@@ -10,18 +10,58 @@ Over the past few years, I’ve had to implement WebSocket communication many ti
 
 This library grew out of my work on [theshutter.app](https://theshutter.app) ([@heyshutterapp](https://x.com/heyshutterapp)) — a platform for running remote photoshoots and recording video interviews — which involves a lot of real-time communication over WebSockets and WebRTC.
 
-### Connection model
-At its core, this is a finite state machine around the WebSocket lifecycle and its health.
+### AlwaysConnected
+
+The core of this library is `AlwaysConnected` — a finite state machine that keeps a WebSocket connection alive. It handles reconnection automatically, so you don't have to.
+
+#### State machine
+
+```
+Disconnected → Connecting → Limbo → Connected
+                   ↑                    │
+                   └── Reconnecting ←───┘
+                         (on error, close, or heartbeat timeout)
+```
 
 - **disconnected** — initial and terminal state
-- **connecting** — initial connection attempt
-- **reconnecting** — reconnection after a failure (network error, heartbeat timeout)
-- **limbo** — established transport-level connection, but application-level not yet
-- **connected** — desired state of the connection; healthy at both transport-level and application-level
+- **connecting** — WebSocket is being created
+- **limbo** — transport connected, waiting for application-level handshake
+- **connected** — healthy connection at both transport and application level
+- **reconnecting** — recovering from failure, will retry after delay
 
-When the connection reaches the limbo state, it triggers a hook to the client code, so that the application can initialize the connection — for example, authenticate, join a room, subscribe to a topic, etc.
+#### Application-level connection
 
-At configurable intervals, the socket sends an outbound heartbeat, and also monitors for inbound ones; if a heartbeat hasn’t been received during a specified period, the connection is marked as unhealthy and reconnection is triggered.
+`AlwaysConnected` is protocol-agnostic. When the WebSocket opens, it transitions to **limbo** and calls your `onConnectedFn()`. This is where you authenticate, join a room, subscribe to topics, etc. Return `true` to confirm the connection is ready, which transitions to **connected**.
+
+If your handshake doesn't complete within `connectionTimeout`, the connection is considered failed and reconnection is triggered.
+
+#### Heartbeats
+
+Heartbeat handling is split by responsibility:
+
+- **Outbound**: `AlwaysConnected` calls your `sendHeartbeat(ws, interval)` function at `heartbeatInterval`. You decide what to send (ping frame, JSON message, etc.).
+
+- **Inbound**: Your application tracks incoming heartbeats. When you detect a missing one, call `handleWebSocketHeartbeatTimeout()` to trigger reconnection.
+
+This design keeps `AlwaysConnected` unaware of your wire protocol.
+
+#### WebSocket factory
+
+`AlwaysConnected` doesn't create WebSockets directly. Instead, you provide a `createWs()` factory function. This allows you to:
+- Use custom WebSocket implementations
+- Add logging or instrumentation
+
+#### Configuration
+
+All timing is configurable via the options object:
+
+```typescript
+{
+  heartbeatInterval: 15000,  // How often to send outbound heartbeats
+  reconnectDelay: 2000,      // Delay before reconnection attempt
+  connectionTimeout: 15000,  // Max time to complete handshake in limbo
+}
+```
 
 ### Roadmap
 - Fully encapsulate WebSocket management

@@ -9,8 +9,12 @@ export const ConnectionState = {
 
 export type ConnectionState = (typeof ConnectionState)[keyof typeof ConnectionState];
 
-export type createWebSocketFn = () => WebSocket;
+export interface WebSocketIsh {
+  close(): void;
+}
+
+export type createWebSocketFn = () => WebSocketIsh;
 export type heartbeatFn = (
-  ws: WebSocket,
+  ws: WebSocketIsh,
   timeSinceLastHeartbeat: number,
 ) => void;
