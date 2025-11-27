@@ -16,10 +16,19 @@ export class GreatWebSocket implements Operator {
     private readonly sendHeartbeat: heartbeatFn,
   ) {
     this.#ws = new AlwaysConnected(
-      () => createWebSocket(url, this, this.onMessageFn as (ws: unknown, ev: MessageEvent) => void),
+      () =>
+        createWebSocket(
+          url,
+          this,
+          this.onMessageFn as (ws: unknown, ev: MessageEvent) => void,
+        ),
       this.onConnectedFn,
       this.sendHeartbeat,
-      { heartbeatInterval: 15000, reconnectDelay: 2000, connectionTimeout: 15000 },
+      {
+        heartbeatInterval: 15000,
+        reconnectDelay: 2000,
+        connectionTimeout: 15000,
+      },
     );
   }
 
@@ -37,9 +46,9 @@ export class GreatWebSocket implements Operator {
     return this.#ws?.state ?? ConnectionState.Disconnected;
   }
 
-  /** 
-    * The underlying WebSocket instance
-    */
+  /**
+   * The underlying WebSocket instance
+   */
   get websocket(): WebSocket | null {
     return (this.#ws?.websocket as WebSocket) ?? null;
   }

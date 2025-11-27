@@ -33,7 +33,11 @@ describe("AlwaysConnected", () => {
       createWebSocketFn,
       onConnectedFn,
       sendHeartbeatFn,
-      { heartbeatInterval: 15000, reconnectDelay: 5000, connectionTimeout: 15000 },
+      {
+        heartbeatInterval: 15000,
+        reconnectDelay: 5000,
+        connectionTimeout: 15000,
+      },
     );
   });
 
@@ -44,8 +48,9 @@ describe("AlwaysConnected", () => {
 
   const waitForPendingConnection = async () => {
     const lastIndex = onConnectedFn.mock.results.length - 1;
-    const connectPromise = onConnectedFn.mock.results[lastIndex]
-      ?.value as Promise<boolean> | undefined;
+    const connectPromise = onConnectedFn.mock.results[lastIndex]?.value as
+      | Promise<boolean>
+      | undefined;
 
     if (connectPromise == null) {
       throw new Error("onConnectedFn did not return a promise");

@@ -7,7 +7,8 @@ export const ConnectionState = {
   Error: "error",
 } as const;
 
-export type ConnectionState = (typeof ConnectionState)[keyof typeof ConnectionState];
+export type ConnectionState =
+  (typeof ConnectionState)[keyof typeof ConnectionState];
 
 export interface WebSocketIsh {
   close(): void;

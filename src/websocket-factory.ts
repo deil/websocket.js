@@ -1,4 +1,4 @@
-import { WebSocketIsh } from "./models";
+import type { WebSocketIsh } from "./models";
 
 export interface Operator {
   handleWebSocketOpen(): void;

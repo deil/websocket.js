@@ -4,10 +4,10 @@ import {
 } from "./events";
 import {
   ConnectionState,
-  WebSocketIsh,
   type ConnectionState as ConnectionStateType,
   type createWebSocketFn,
   type heartbeatFn,
+  type WebSocketIsh,
 } from "./models";
 
 export interface AlwaysConnectedOptions {
@@ -17,7 +17,6 @@ export interface AlwaysConnectedOptions {
 }
 
 export class AlwaysConnected extends EventTarget {
-
   #active = false;
   #ws: WebSocketIsh | null = null;
   #state: ConnectionStateType = ConnectionState.Disconnected;
