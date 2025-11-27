@@ -1,33 +1,22 @@
 import type { GreatWebSocketEventMap } from "./events";
 import type { PendingCommand } from "./internal";
-import { AlwaysConnected, type Operator } from "./keep-online";
+import { AlwaysConnected } from "./keep-online";
 import { ConnectionState, type heartbeatFn } from "./models";
 import type { RemoteCommand } from "./rpc";
-import { createWebSocket } from "./websocket-factory";
+import { createWebSocket, type Operator } from "./websocket-factory";
 
 export class GreatWebSocket implements Operator {
-  #client: unknown | null = null;
   #ws: AlwaysConnected | null = null;
   #pendingCommands: PendingCommand[] = [];
-
-  get client(): unknown | null {
-    return this.#client;
-  }
-
-  get websocket(): WebSocket | null {
-    return this.#ws?.websocket ?? null;
-  }
 
   constructor(
     url: string,
     private readonly onConnectedFn: () => Promise<boolean>,
     private readonly onMessageFn: (ws: WebSocket, ev: MessageEvent) => void,
     private readonly sendHeartbeat: heartbeatFn,
-    client: unknown | null,
   ) {
-    this.#client = client;
     this.#ws = new AlwaysConnected(
-      () => createWebSocket(url, this, this.onMessageFn),
+      () => createWebSocket(url, this, this.onMessageFn as (ws: unknown, ev: MessageEvent) => void),
       this.onConnectedFn,
       this.sendHeartbeat,
       { heartbeatInterval: 15000, reconnectDelay: 2000, connectionTimeout: 15000 },
@@ -48,6 +37,13 @@ export class GreatWebSocket implements Operator {
     return this.#ws?.state ?? ConnectionState.Disconnected;
   }
 
+  /** 
+    * The underlying WebSocket instance
+    */
+  get websocket(): WebSocket | null {
+    return (this.#ws?.websocket as WebSocket) ?? null;
+  }
+
   /**
    * Activate - initiate the WebSocket connection and keep it alive
    */
@@ -60,18 +56,6 @@ export class GreatWebSocket implements Operator {
    */
   shutdown() {
     this.#ws?.shutdown();
-  }
-
-  handleWebSocketOpen() {
-    this.#ws?.handleWebSocketOpen();
-  }
-
-  handleWebSocketError(ws: WebSocket) {
-    this.#ws?.handleWebSocketError(ws);
-  }
-
-  handleWebSocketClosed(ws: WebSocket) {
-    this.#ws?.handleWebSocketClosed(ws);
   }
 
   /**
@@ -101,9 +85,16 @@ export class GreatWebSocket implements Operator {
 
   //#endregion
 
-  send(data: string | ArrayBufferLike | Blob | ArrayBufferView): void {
-    this.#ws?.websocket?.send(data);
+  send(data: string | ArrayBufferLike | Blob | ArrayBufferView): boolean {
+    if (!this.isConnected()) {
+      return false;
+    }
+
+    this.websocket?.send(data);
+    return true;
   }
+
+  //#region RPC
 
   call(command: RemoteCommand): Promise<unknown> {
     const cmd = {
@@ -119,7 +110,18 @@ export class GreatWebSocket implements Operator {
     });
   }
 
-  handleMessage(message: unknown): boolean {
+  /**
+   * Dispatch an incoming message to a pending RPC command.
+   *
+   * Call this from your `onMessageFn` callback after parsing the message.
+   * If the message matches a pending command, the command's promise is resolved
+   * and this returns `true`. Otherwise, returns `false` and you should handle
+   * the message yourself (e.g., as an event or notification).
+   *
+   * @param message - The parsed message to dispatch
+   * @returns `true` if the message was handled as an RPC response, `false` otherwise
+   */
+  tryHandleAsControlMessage(message: unknown): boolean {
     const matchedCommand = this.#pendingCommands.find((cmd) =>
       cmd.command.responseMatches(message),
     );
@@ -141,4 +143,26 @@ export class GreatWebSocket implements Operator {
 
     return false;
   }
+
+  //#endregion
+
+  //#region Internals
+
+  private isConnected(): boolean {
+    return this.state === ConnectionState.Connected;
+  }
+
+  handleWebSocketOpen() {
+    this.#ws?.handleWebSocketOpen();
+  }
+
+  handleWebSocketError(ws: WebSocket) {
+    this.#ws?.handleWebSocketError(ws);
+  }
+
+  handleWebSocketClosed(ws: WebSocket) {
+    this.#ws?.handleWebSocketClosed(ws);
+  }
+
+  //#endregion
 }

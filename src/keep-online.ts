@@ -10,20 +10,13 @@ import {
   type heartbeatFn,
 } from "./models";
 
-export interface Operator {
-  handleWebSocketOpen(): void;
-  handleWebSocketClosed(ws: WebSocket): void;
-  handleWebSocketError(ws: WebSocket): void;
-  handleWebSocketHeartbeatTimeout(): void;
-}
-
 export interface AlwaysConnectedOptions {
   heartbeatInterval: number;
   reconnectDelay: number;
   connectionTimeout: number;
 }
 
-export class AlwaysConnected extends EventTarget implements Operator {
+export class AlwaysConnected extends EventTarget {
 
   #active = false;
   #ws: WebSocketIsh | null = null;

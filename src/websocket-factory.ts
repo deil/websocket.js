@@ -1,5 +1,11 @@
-import type { Operator } from "./keep-online";
 import { WebSocketIsh } from "./models";
+
+export interface Operator {
+  handleWebSocketOpen(): void;
+  handleWebSocketClosed(ws: WebSocket): void;
+  handleWebSocketError(ws: WebSocket): void;
+  handleWebSocketHeartbeatTimeout(): void;
+}
 
 export const createWebSocket = (
   wsUrl: string,
